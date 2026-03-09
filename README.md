@@ -14,7 +14,7 @@ Run on 2026-03-09 against this repo to validate the proposed flow end-to-end.
 | `feature/*` | Individual feature branches (created from main) |
 | `hotfix/*` | Emergency fixes (created from main) |
 
-## Simulation Steps Completed
+## Simulation steps completed
 
 1. Seed app (`app.js`, `config.json`) on main; created `dev` and `qa` branches
 2. Feature A (`feature/login-page`): main -> dev via PR #1 (clean merge)
@@ -27,7 +27,7 @@ Run on 2026-03-09 against this repo to validate the proposed flow end-to-end.
 9. Feature C (`feature/user-profile`) + Feature D (`feature/notifications`) both merged to dev; only C promoted to qa. Release `release/26.03.2` cut. (CONFLICT on notifications -> dev, PR #11)
 10. Branch reconciliation: not needed because back-merges already synced main into dev/qa
 
-## Merge Conflicts Encountered
+## Merge conflicts encountered
 
 | Step | PR | Branches | File | Cause |
 |------|----|----------|------|-------|
@@ -36,7 +36,7 @@ Run on 2026-03-09 against this repo to validate the proposed flow end-to-end.
 
 Both conflicts required checking out the feature branch locally, merging the target into it, resolving, and pushing before the PR became mergeable.
 
-## Findings: Weak Points
+## Findings: weak points
 
 ### 1. Merge conflicts on shared files are inevitable
 Every time two features branch from `main` and touch the same file (like `app.js`), the second merge to `dev` will conflict. In a real codebase with dozens of features touching shared configuration, routing, or DI files, this will be constant. The branching strategy doesn't address this at all.
@@ -62,7 +62,7 @@ Our hotfix back-merges were clean because no one was actively modifying `login.j
 ### 8. The graph gets complex fast
 After just 4 features and 1 hotfix, the commit graph is already hard to follow (60+ lines). With a full team running parallel features across multiple release cycles, the history will be very difficult to reason about.
 
-## PR Log
+## PR log
 
 | # | Title | Flow | Result |
 |---|-------|------|--------|
@@ -88,3 +88,55 @@ After just 4 features and 1 hotfix, the commit graph is already hard to follow (
 | `prod-26.03.1` | release/26.03.1 | Production deployment |
 | `prod-26.03.1-hotfix` | release/26.03.1-hotfix | Hotfix production deployment |
 | `rc-26.03.2` | release/26.03.2 | Second release candidate |
+
+---
+
+## Experiment summary
+
+I ran the full proposed branching strategy against a small Node.js app -- 4 features, 1 hotfix, 2 release cycles. The idea was to stress-test the flow in a controlled environment before we try it on the real codebase.
+
+### What worked
+
+**Selective QA promotion works when features don't overlap.** Feature C (user-profile) went to QA on its own, Feature D (notifications) stayed in dev, and the release branch had exactly what we intended. This is the whole point of the new flow, and it delivered.
+
+**The hotfix path works.** Branch from main, fix, merge into a release branch, tag for prod, back-merge everywhere. No surprises.
+
+**The tagging convention is useful.** `rc-`, `uat-`, `prod-` prefixed tags make it easy to trace any commit to its deployment stage.
+
+### What breaks down at scale
+
+This simulation used 4 tiny files. The real Dealertrack codebase has thousands of files, shared configuration, DI containers, routing tables -- files that many features touch at the same time. Here's where things get ugly:
+
+**Merge conflicts become routine.** We hit conflicts on 2 out of 4 feature merges to dev, with just one shared file (`app.js`). In reality, files like `Startup.cs`, `appsettings.json`, route registrations, and DI configuration get touched by almost every feature. With 6-8 features in parallel, expect conflicts on roughly every second merge to dev.
+
+**Selective promotion breaks when features share files.** When `feature/dashboard` had to merge dev into itself to resolve a conflict, it absorbed `feature/login-page`'s code. After that, the dashboard branch was no longer independently promotable -- it carried login code with it. In a real sprint with 6 features all touching shared files, most feature branches will be contaminated by mid-sprint. The "promote individual features to QA" model only works for features that touch completely separate areas of the codebase.
+
+**Feature branches can't be deleted after the dev merge.** This is a process trap. GitHub offers "Delete branch" after merging a PR. Every developer has muscle memory for clicking it. But in this flow, the feature branch has to survive until it's also merged to QA. One accidental deletion and the QA promotion path is gone. Recreating the branch from a merge commit is doable but error-prone.
+
+**The commit graph gets messy fast.** After 4 features and 1 hotfix, the graph was already 60+ lines of merge commits. In a real release cycle with 10+ features, multiple hotfixes, and back-merges, the history becomes very hard to follow. Figuring out "when did this change get introduced" turns into real work.
+
+**The hotfix procedure contradicts release immutability.** The doc says release branches are immutable, but hotfixes need to go somewhere. We worked around this by creating a separate `release/26.03.1-hotfix` branch, but that's not documented. If someone applies the hotfix directly to the existing release branch (which the doc also implies is fine), the "immutable" guarantee is gone.
+
+### What this looks like in a real sprint
+
+This simulation used a single `app.js` file and 4 features. The real Dealertrack codebase is a large solution with multiple sub-projects, shared configuration files, DI registrations, routing, and dozens of developers working in parallel. The conflicts and contamination we saw here with 4 tiny features will be significantly worse at that scale.
+
+Assume a 2-week sprint with 8 features across 4 developers, releasing every 2 weeks:
+
+- **Day 1-3:** Features branch from main, start clean. First merges to dev go smoothly.
+- **Day 4-6:** Second and third features merge to dev. Conflicts start appearing on shared files -- solution-level configs, DI registrations, shared projects. Feature branches start absorbing each other's code through conflict resolution.
+- **Day 7-8:** QA promotion begins. Features that touched shared files can't be promoted independently. Team has to choose: promote them as a batch (losing selective promotion) or accept the contamination.
+- **Day 9:** Release branch cut from QA. QA finds a bug in Feature B. No documented procedure for pulling it out. Team either reverts on the release branch (violating immutability) or abandons it and cuts a new one from a patched QA branch.
+- **Day 10-11:** UAT runs. A production bug surfaces. Hotfix goes out. The back-merge to dev conflicts with in-flight features for the next sprint.
+- **Day 12-14:** Release goes to prod. Main is updated. New feature branches from main are now out of sync with dev, which has accumulated unreleased work plus leftover conflict-resolution code from the previous cycle.
+
+The overhead will scale with the size of the codebase. In a large monorepo with multiple sub-projects, the number of merge conflicts and the time spent resolving them will be much higher than what we saw in this toy example. Add to that the process confusion around selective promotion for entangled features and the ongoing risk of someone deleting a feature branch too early.
+
+### Recommendations
+
+1. Set a reconciliation cadence. Merge main back into dev and qa after every production release. Don't leave it to chance.
+2. Turn off auto-delete for feature branches. Configure the repo setting, or at minimum make it very clear in the team docs that feature branches have to survive until QA promotion.
+3. Sort out hotfix vs. immutability. Either hotfixes always create new release branches (what we did here) or "immutable" just means "no new features but hotfixes are fine." Pick one, write it down.
+4. Document the QA-rejection procedure. What happens when QA rejects a feature after the release branch is already cut? Revert on the release branch? Abandon and re-cut? The team needs to know before it happens.
+5. Be honest that selective promotion has limits. When features share files, batch promotion to QA may be the only practical option. The process should say so instead of implying full independence is always possible.
+6. Consider feature flags as the actual solution for selective release. If the business needs Feature A in prod without Feature B, feature flags at the application level are more reliable than trying to keep branches surgically isolated -- especially in a monolithic codebase where features inevitably touch the same files.
