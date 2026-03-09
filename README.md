@@ -236,3 +236,119 @@ The overhead will scale with the size of the codebase. In a large monorepo with 
 4. Document the QA-rejection procedure. What happens when QA rejects a feature after the release branch is already cut? Revert on the release branch? Abandon and re-cut? The team needs to know before it happens.
 5. Be honest that selective promotion has limits. When features share files, batch promotion to QA may be the only practical option. The process should say so instead of implying full independence is always possible.
 6. Consider feature flags as the actual solution for selective release. If the business needs Feature A in prod without Feature B, feature flags at the application level are more reliable than trying to keep branches surgically isolated -- especially in a monolithic codebase where features inevitably touch the same files.
+
+---
+
+## Alternative approaches
+
+The problem we're trying to solve: ship some features without others, through QA and UAT gates, in a large monolithic codebase where features overlap on shared files. Here are the realistic options beyond the branch-based selective promotion we tested.
+
+### Option 1: Trunk-based development + feature flags
+
+Everyone merges to `main` (or a single `dev` branch) frequently. Features are wrapped in flags. QA tests with flags on/off. Release means deploying main and toggling flags in config.
+
+```
+main  ----A----B----C----D----E---->
+           ^flag   ^flag      ^flag
+
+QA:   deploy main, enable flags for features under test
+UAT:  deploy main, enable flags for approved features
+Prod: deploy main, enable flags for released features
+```
+
+Why it works: no branch isolation needed. "Don't ship Feature B" just means "don't turn on Feature B's flag." No merge conflicts from branching, no contamination, no branch lifecycle to manage.
+
+Why it's hard: you need flag infrastructure (LaunchDarkly, or even config-based toggles). Every feature needs conditionals wrapping it. Developers have to clean up old flags. For a large existing .NET codebase, retrofitting flags into features that touch shared DI registration, routing, etc. is real work. It's a discipline shift, not just a process change.
+
+This is where most mature teams end up long-term, but getting there takes investment.
+
+### Option 2: Release train with "miss the train" rule
+
+Fixed release cadence (say, every 2 weeks). One integration branch (`dev`). Features merge to dev as they're completed. At the cut-off date, whatever's in dev and QA-approved goes into the release. Features that aren't ready wait for the next train.
+
+```
+main  ──────────────────────R1──────────────R2────>
+dev   ──A──B──C──────────────│──D──E──F──────│────>
+                              \               \
+                         release/1         release/2
+```
+
+Why it works: no selective promotion at all. No QA branch. No feature-branch-must-survive problem. If Feature B isn't ready, it doesn't merge to dev before the cutoff. Simple rule, everyone gets it.
+
+Why it's hard: if Feature B is already merged to dev and QA finds a bug, you either fix it before the train leaves or revert it. Reverts on shared files can be messy. Developers also feel pressure to merge before the cutoff, which can lower code quality.
+
+Works well for teams with a predictable sprint cadence where "not ready = next release" is an acceptable answer to the business.
+
+### Option 3: Cherry-pick releases
+
+Features merge to `dev` normally. When it's time to build a release, you cherry-pick specific feature commits onto a release branch cut from `main` (not from dev).
+
+```
+main      ──────────────────────────────────────>
+dev       ──A──B──C──D──────────────────────────>
+                  |     |
+release/1  ──────(A)──(C)──>   (cherry-picked A and C, skipped B and D)
+```
+
+```
+git checkout -b release/26.03.1 main
+git cherry-pick <commit-hash-of-feature-A>
+git cherry-pick <commit-hash-of-feature-C>
+# test, tag, deploy
+```
+
+Why it works: true selective promotion. You pick exactly what goes in. Feature branches don't need to survive. No contamination because you're copying commits, not merging branch histories.
+
+Why it's hard: cherry-picks create duplicate commits (different SHAs). If a feature has multiple commits, you need to pick all of them in order. Conflicts still happen if features touch the same files. And you lose the merge-commit audit trail, so `git log` won't clearly show "feature X was included in release Y."
+
+Manageable for small teams with few features per release. Gets painful at scale.
+
+### Option 4: GitHub Flow + environment tags
+
+Drop `dev` and `qa` as long-lived branches entirely. Use `main` as the single integration point. Deploy to environments using tags or CI triggers, not branches.
+
+```
+main  ──A──B──C──D──E──>
+         |        |
+         v        v
+     deploy-qa  deploy-uat
+
+Feature branches: short-lived, merge to main via PR
+QA: triggered by tagging or CI pipeline on main
+UAT: same artifact, promoted by tag
+Prod: same artifact, promoted by tag
+```
+
+Why it works: one branch, no drift, no reconciliation. QA and UAT test the same artifact that goes to prod. "What's in prod" is always a tagged commit on main.
+
+Why it's hard: you lose selective promotion entirely. Whatever's on main goes through the pipeline together. If Feature B breaks QA, the whole release is blocked until it's fixed or reverted. Works well when test coverage is good and features are small.
+
+The simplest model if you can accept "all or nothing" releases.
+
+### Option 5: Modular architecture (the root cause fix)
+
+The reason all branching strategies struggle with our codebase is that features overlap on shared files. Reduce that overlap at the code level, and any branching model works better.
+
+Concrete changes for a .NET solution:
+- Split `Startup.cs` / `Program.cs` so each module registers its own services (each project has an `AddXxxServices()` extension method)
+- Move route registrations into their respective modules instead of one central file
+- Use separate `appsettings.{module}.json` files merged at startup instead of one giant config
+- If using a monorepo with multiple projects, keep project-level configs in the project folder
+
+If Feature A only touches files in `src/Login/` and Feature B only touches `src/Dashboard/`, they'll never conflict regardless of branching strategy. Selective promotion, cherry-picking, parallel development -- all work cleanly.
+
+The catch: it's an architectural refactor of an existing large codebase. Not something you do in a sprint. But every step toward it pays off, and it's the only option here that addresses the root cause rather than working around it.
+
+### Which one to pick
+
+Depends on what constraints you can actually change.
+
+| If you can... | Then consider... |
+|---|---|
+| Change the architecture | Option 5 (modular), then any branching model works |
+| Add feature flag infrastructure | Option 1 (trunk + flags), most flexible, scales best |
+| Accept "all or nothing" releases | Option 4 (GitHub Flow), simplest, least overhead |
+| Accept "not ready = next release" | Option 2 (release train), simple rule, no selective promotion needed |
+| Need selective promotion today with no other changes | Option 3 (cherry-pick), works but doesn't scale |
+
+The strategy we simulated tries to get selective promotion through branch isolation. We showed that breaks down when features share files. The question for the team is: which constraint are we willing to change -- the architecture, the release model, or the tooling?
