@@ -16,16 +16,112 @@ Run on 2026-03-09 against this repo to validate the proposed flow end-to-end.
 
 ## Simulation steps completed
 
-1. Seed app (`app.js`, `config.json`) on main; created `dev` and `qa` branches
-2. Feature A (`feature/login-page`): main -> dev via PR #1 (clean merge)
-3. Feature B (`feature/dashboard`): main -> dev via PR #2 (CONFLICT on `app.js`)
-4. Selective QA promotion: login -> qa (PR #3, clean), dashboard -> qa (PR #4, clean due to prior resolution)
-5. Release branch `release/26.03.1` cut from qa, tagged `rc-26.03.1`
-6. UAT deployment simulated, tagged `uat-26.03.1`
-7. Production deployment: tagged `prod-26.03.1`, merged release back to main (PR #5)
-8. Hotfix: `hotfix/login-fix` -> `release/26.03.1-hotfix` (PR #6), back-merged to main/dev/qa (PRs #7-9)
-9. Feature C (`feature/user-profile`) + Feature D (`feature/notifications`) both merged to dev; only C promoted to qa. Release `release/26.03.2` cut. (CONFLICT on notifications -> dev, PR #11)
-10. Branch reconciliation: not needed because back-merges already synced main into dev/qa
+### Step 1: Set up long-lived branches + seed app
+Created `app.js` and `config.json` on main, then branched `dev` and `qa` from it.
+```
+git checkout main
+# add app.js, config.json, commit, push
+git checkout -b dev main && git push origin dev
+git checkout -b qa main && git push origin qa
+```
+
+### Step 2: Feature A -- branch from main, merge to dev
+Created `feature/login-page` from main, added `login.js`, updated `app.js`. PR #1 to dev -- merged clean.
+```
+git checkout -b feature/login-page main
+# add login.js, update app.js, commit, push
+# PR: feature/login-page -> dev (merged clean)
+```
+
+### Step 3: Feature B -- second feature in parallel (CONFLICT)
+Created `feature/dashboard` from main (not dev), added `dashboard.js`, updated `app.js`. PR #2 to dev -- **conflict on `app.js`** because both features modified it from the same main base.
+
+To resolve, had to merge dev into the feature branch first:
+```
+git checkout feature/dashboard
+git merge origin/dev
+# CONFLICT in app.js -- both features changed the same lines
+# manually resolve: combine both imports and module registrations
+git add app.js
+git commit -m "Resolve merge conflict: combine login + dashboard in app.js"
+git push origin feature/dashboard
+# PR now mergeable -- merged
+```
+
+### Step 4: Promote features to QA
+Per the new process, individual feature branches merge into QA (not the whole dev branch):
+```
+# PR: feature/login-page -> qa (merged clean)
+# PR: feature/dashboard -> qa (merged clean -- but only because the conflict
+#   resolution commit already pulled in login code, so dashboard branch is
+#   no longer a pure "dashboard-only" branch)
+```
+
+### Step 5: Create release branch
+```
+git checkout -b release/26.03.1 qa
+git push origin release/26.03.1
+git tag rc-26.03.1 release/26.03.1
+git push origin rc-26.03.1
+```
+
+### Step 6: UAT deployment
+```
+git tag uat-26.03.1 release/26.03.1
+git push origin uat-26.03.1
+```
+
+### Step 7: Production deployment
+Tagged for prod, then merged release back into main:
+```
+git tag prod-26.03.1 release/26.03.1
+git push origin prod-26.03.1
+# PR: release/26.03.1 -> main (merged clean)
+```
+
+### Step 8: Hotfix
+Found a bug in `login.js`. Created hotfix from main, merged into a new release branch, back-merged everywhere:
+```
+git checkout -b hotfix/login-fix main
+# fix login.js, commit, push
+git checkout -b release/26.03.1-hotfix main
+git push origin release/26.03.1-hotfix
+# PR: hotfix/login-fix -> release/26.03.1-hotfix (merged)
+git tag prod-26.03.1-hotfix release/26.03.1-hotfix
+git push origin prod-26.03.1-hotfix
+
+# back-merge to all long-lived branches:
+# PR: release/26.03.1-hotfix -> main (merged clean)
+# PR: release/26.03.1-hotfix -> dev  (merged clean)
+# PR: release/26.03.1-hotfix -> qa   (merged clean)
+```
+
+### Step 9: Selective QA promotion (stress test)
+Feature C (`user-profile`) and Feature D (`notifications`) both merged to dev, but only C promoted to QA.
+
+Feature D hit the same `app.js` conflict pattern as Step 3:
+```
+git checkout feature/notifications
+git merge origin/dev
+# CONFLICT in app.js -- same pattern, had to combine all modules
+git add app.js
+git commit -m "Resolve merge conflict: combine profile + notifications in app.js"
+git push origin feature/notifications
+# PR now mergeable -- merged to dev
+```
+
+Selective promotion:
+```
+# PR: feature/user-profile -> qa (merged clean)
+# feature/notifications stays in dev only
+git checkout -b release/26.03.2 qa
+git push origin release/26.03.2
+git tag rc-26.03.2 release/26.03.2 && git push origin rc-26.03.2
+```
+Result: `release/26.03.2` has features A+B+C but not D. Selective promotion worked.
+
+### Step 10: Branch reconciliation
+Attempted to merge main -> dev and main -> qa. GitHub reported "no commits between dev and main" -- the back-merges from Step 8 had already synced everything. Not needed as a separate step when back-merges are done consistently.
 
 ## Merge conflicts encountered
 
